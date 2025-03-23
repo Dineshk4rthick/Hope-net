@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Button } from './button';
-import { uploadToLighthouse, getIpfsUrl } from '@/lib/lighthouse';
+import { uploadToPinata, getIpfsUrl } from '@/lib/pinata';
 import { Progress } from './progress';
 import { toast } from 'sonner';
 
@@ -14,13 +14,17 @@ interface FileUploadProps {
 export function FileUpload({ onUploadComplete, className }: FileUploadProps) {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [showProgress, setShowProgress] = useState(false);
+  const [uploadedCid, setUploadedCid] = useState<string | null>(null);
+  const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   
   // Clean up interval on unmount
   useEffect(() => {
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
     };
   }, []);
   
@@ -29,34 +33,37 @@ export function FileUpload({ onUploadComplete, className }: FileUploadProps) {
     if (!file) return;
     
     try {
+      // Reset state
       setIsUploading(true);
       setUploadProgress(0);
-      setShowProgress(true);
+      setErrorMessage(null);
+      setUploadedCid(null);
+      setUploadedUrl(null);
       
-      console.log("Starting upload for file:", file.name);
+      console.log("Starting upload for file:", file.name, "size:", file.size);
       
       // Set a manual progress update to show activity
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
       
-      // Use a faster interval for smoother progress updates
       intervalRef.current = setInterval(() => {
         setUploadProgress(prev => {
-          // Increase by smaller increments for smoother progress
-          const increment = Math.max(1, Math.floor(95 - prev) / 10);
-          return prev < 95 ? Math.min(95, prev + increment) : prev;
+          return prev < 90 ? prev + 5 : prev;
         });
-      }, 500);
+      }, 1000);
       
-      const cid = await uploadToLighthouse(file, (progressData: any) => {
-        console.log("Progress update:", progressData);
-        
-        if (progressData && progressData.total && progressData.uploaded) {
-          // Cap at 90% from real progress updates to ensure we can show completion
-          const percentageDone = Math.min(90, Math.round((progressData.uploaded / progressData.total) * 100));
-          console.log(`Upload progress: ${percentageDone}% (${progressData.uploaded}/${progressData.total})`);
-          setUploadProgress(percentageDone);
-        }
-      });
+      // Add metadata to the file
+      const metadata = {
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        lastModified: file.lastModified,
+        uploadedAt: new Date().toISOString(),
+      };
+      
+      // Upload to Pinata with metadata
+      const cid = await uploadToPinata(file, metadata);
       
       // Clear the interval
       if (intervalRef.current) {
@@ -64,45 +71,54 @@ export function FileUpload({ onUploadComplete, className }: FileUploadProps) {
         intervalRef.current = null;
       }
       
-      // Explicitly show completion with a sequence of updates
-      setUploadProgress(95);
+      // Force progress to 100% when complete
+      setUploadProgress(100);
       
-      // Short delay then jump to 100%
-      setTimeout(() => {
-        setUploadProgress(100);
-        
-        const url = getIpfsUrl(cid);
-        console.log("Upload complete, CID:", cid);
-        
-        toast.success('File uploaded successfully to IPFS');
-        
-        if (onUploadComplete) {
-          onUploadComplete(cid, url);
-        }
-        
-        // Keep showing the progress bar for a moment after completion
-        setTimeout(() => {
-          setIsUploading(false);
-          // Keep showing progress for 2 more seconds after upload completes
-          setTimeout(() => {
-            setShowProgress(false);
-          }, 2000);
-        }, 500);
-      }, 800);
+      // Generate multiple gateway URLs for better availability
+      const url = getIpfsUrl(cid);
+      const backupUrl = `https://ipfs.io/ipfs/${cid}`;
+      const cloudflareUrl = `https://cloudflare-ipfs.com/ipfs/${cid}`;
       
+      setUploadedCid(cid);
+      setUploadedUrl(url);
+      
+      console.log("Upload complete, CID:", cid, "URL:", url);
+      
+      toast.success('File uploaded successfully to IPFS');
+      
+      if (onUploadComplete) {
+        // Pass the CID and URL to the parent component
+        onUploadComplete(cid, url);
+      }
     } catch (error) {
       console.error('Upload failed:', error);
-      toast.error('Failed to upload file');
-      
+      const message = error instanceof Error ? error.message : 'Unknown error occurred';
+      setErrorMessage(message);
+      toast.error(`Failed to upload file: ${message}`);
+    } finally {
       // Clear any running interval
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
       
-      setIsUploading(false);
-      setShowProgress(false);
+      // Small delay to ensure UI updates
+      setTimeout(() => {
+        setIsUploading(false);
+      }, 500);
     }
+  };
+  
+  // Function to copy CID to clipboard
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text)
+      .then(() => {
+        toast.success('Copied to clipboard');
+      })
+      .catch(err => {
+        console.error('Failed to copy:', err);
+        toast.error('Failed to copy to clipboard');
+      });
   };
   
   return (
@@ -125,13 +141,76 @@ export function FileUpload({ onUploadComplete, className }: FileUploadProps) {
           />
         </div>
         
-        {showProgress && (
+        {(isUploading || uploadProgress === 100) && (
           <div className="w-full">
             <Progress value={uploadProgress} className="h-2" />
             <p className="text-sm text-muted-foreground mt-1">
               {uploadProgress < 100 ? `Uploading: ${uploadProgress}%` : 'Upload complete!'}
             </p>
           </div>
+        )}
+        
+        {uploadedCid && (
+          <div className="mt-2 p-3 bg-muted rounded-md">
+            <p className="text-sm font-medium">File uploaded successfully</p>
+            <div className="flex items-center mt-1">
+              <p className="text-xs text-muted-foreground break-all flex-1">
+                CID: {uploadedCid}
+              </p>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="h-6 px-2"
+                onClick={() => copyToClipboard(uploadedCid)}
+              >
+                Copy
+              </Button>
+            </div>
+            {uploadedUrl && (
+              <div className="mt-2 space-y-1">
+                <p className="text-xs font-medium">Try these IPFS gateways:</p>
+                <p className="text-xs text-muted-foreground">
+                  <a 
+                    href={uploadedUrl} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    Pinata Gateway
+                  </a>
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  <a 
+                    href={`https://ipfs.io/ipfs/${uploadedCid}`} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    IPFS.io Gateway
+                  </a>
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  <a 
+                    href={`https://cloudflare-ipfs.com/ipfs/${uploadedCid}`} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    Cloudflare Gateway
+                  </a>
+                </p>
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground mt-2">
+              <span className="text-yellow-500">Note:</span> It may take a few minutes for the file to be available on IPFS gateways.
+            </p>
+          </div>
+        )}
+        
+        {errorMessage && (
+          <p className="text-sm text-red-500 mt-1">
+            Error: {errorMessage}
+          </p>
         )}
       </div>
     </div>

@@ -1,7 +1,7 @@
 import lighthouse from '@lighthouse-web3/sdk';
 
 // Your Lighthouse API key
-const apiKey = process.env.NEXT_PUBLIC_LIGHTHOUSE_API_KEY || '0e3229646e2d4c9ba120a24b2335c3cc';
+const apiKey = process.env.NEXT_PUBLIC_LIGHTHOUSE_API_KEY || '';
 
 /**
  * Upload a file to Lighthouse/IPFS
@@ -14,22 +14,25 @@ export const uploadToLighthouse = async (
   onProgress?: (progressData: any) => void
 ): Promise<string> => {
   try {
+    // For debugging
     console.log("Starting upload with API key:", apiKey.substring(0, 5) + "...");
     
     // Create a FormData object as required by the Lighthouse SDK
     const formData = new FormData();
     formData.append('file', file);
     
-    console.log("File details:", {
-      name: file.name,
-      type: file.type,
-      size: file.size
-    });
+    // Modify the progress callback to properly handle the progress data
+    const progressCallback = (progressData: any) => {
+      console.log("Progress data received:", progressData);
+      if (onProgress && progressData && typeof progressData.total === 'number' && typeof progressData.uploaded === 'number') {
+        onProgress(progressData);
+      }
+    };
     
     const output = await lighthouse.upload(
       formData,
       apiKey,
-      onProgress
+      progressCallback
     );
     
     console.log('File uploaded successfully:', output);
